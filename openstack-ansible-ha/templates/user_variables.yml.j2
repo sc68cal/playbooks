@@ -1,0 +1,15 @@
+{{ ansible_managed | comment }}
+
+debug: true
+
+# We can't manage public VIP, since it's floating IP assigned by Neutron
+# in our case. So let's fake it by introducing one more manangement VIP.
+haproxy_keepalived_internal_vip_cidr: 172.29.236.2/24
+haproxy_keepalived_external_vip_cidr: 172.29.236.3/24
+haproxy_keepalived_internal_interface: br-mgmt
+haproxy_keepalived_external_interface: br-mgmt
+
+# Since we are going to use selfsig certificates with haproxy, we should
+# disable their verification.
+keystone_service_adminuri_insecure: true
+keystone_service_internaluri_insecure: true

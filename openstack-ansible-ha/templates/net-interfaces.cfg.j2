@@ -1,0 +1,120 @@
+{{ ansible_managed | comment }}
+
+{# TODO: get index based on index in groups['target'] array #}
+{% set index = hostvars[inventory_hostname].index | int -%}
+
+{# TODO: set role in playbook #}
+{% if index < nodes.controllers %}
+    {% set role = 'controller' %}
+{% elif index < nodes.controllers + nodes.computes %}
+    {% set role = 'compute' %}
+{% else %}
+    {% set role = 'storage' %}
+{% endif %}
+
+#
+# UNDERLYING NETWORK
+#
+# OpenStack Ansible needs to have several networks which will be used for
+# different connectivities (containers, storages, etc). Since we are going
+# to deploy it in OpenStack VMs, we are not allowed to have arbitrary
+# networks (Neutron cuts off unknown traffic). As a solution, we can create
+# a tunnels between nodes that will be used to deliver traffic of the
+# required networks.
+#
+
+auto tun-mgmt
+iface tun-mgmt inet manual
+    pre-up ip link add tun-mgmt type vxlan id 10 group 239.0.0.10 || true
+    up ip link set tun-mgmt up
+    down ip link set tun-mgmt down
+    post-down ip link del tun-mgmt || true
+
+auto tun-vxlan
+iface tun-vxlan inet manual
+    pre-up ip link add tun-vxlan type vxlan id 30 group 239.0.0.30 || true
+    up ip link set tun-vxlan up
+    down ip link set tun-vxlan down
+    post-down ip link del tun-vxlan || true
+
+auto tun-storage
+iface tun-storage inet manual
+    pre-up ip link add tun-storage type vxlan id 20 group 239.0.0.20 || true
+    up ip link set tun-storage up
+    down ip link set tun-storage down
+    post-down ip link del tun-storage || true
+
+
+#
+# OVERLYING NETWORK
+#
+# These are bridges consumed by OpenStack Ansible. They are going to be
+# bridged with corresponding tunnels. In case of physical deployment,
+# they might be bridged with either physical or vlan interfaces.
+#
+
+# Container/Host management bridge
+auto br-mgmt
+iface br-mgmt inet static
+    bridge_stp off
+    bridge_waitport 0
+    bridge_fd 0
+    bridge_ports tun-mgmt
+    address 172.29.236.{{ index + 10 }}
+    netmask 255.255.255.0
+
+# OpenStack Networking VXLAN (tunnel/overlay) bridge
+#
+# Only the COMPUTE and NETWORK nodes must have an IP address
+# on this bridge. When used by infrastructure nodes, the
+# IP addresses are assigned to containers which use this
+# bridge.
+auto br-vxlan
+{% if role == 'compute' %}
+iface br-vxlan inet static
+{% else %}
+iface br-vxlan inet manual
+{% endif %}
+    bridge_stp off
+    bridge_waitport 0
+    bridge_fd 0
+    bridge_ports tun-vxlan
+{% if role == 'compute' %}
+    address 172.29.240.{{ index + 10 }}
+    netmask 255.255.255.0
+{% endif %}
+
+# Storage bridge (optional)
+#
+# Only the COMPUTE and STORAGE nodes must have an IP address
+# on this bridge. When used by infrastructure nodes, the
+# IP addresses are assigned to containers which use this
+# bridge.
+#
+auto br-storage
+{% if role in ('compute', 'storage') %}
+iface br-storage inet static
+{% else %}
+iface br-storage inet manual
+{% endif %}
+    bridge_stp off
+    bridge_waitport 0
+    bridge_fd 0
+    bridge_ports tun-storage
+{% if role in ('compute', 'storage') %}
+    address 172.29.244.{{ index + 10 }}
+    netmask 255.255.255.0
+{% endif %}
+
+# OpenStack Networking VLAN bridge (NOT WORKING)
+#
+# By convention, the bridge should be used in pair with physical iterface,
+# however we can't do it since OpenStack Neutron will stop sending NIC
+# setup via DHCP. The only reason we have this dump interface is because
+# it's mandatory for OpenStack Ansible deployment.
+auto br-vlan
+iface br-vlan inet manual
+    bridge_stp off
+    bridge_waitport 0
+    bridge_fd 0
+    bridge_ports none

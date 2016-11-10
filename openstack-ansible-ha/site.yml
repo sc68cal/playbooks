@@ -1,0 +1,214 @@
+- name: Boot VMs in OpenStack cloud
+  hosts: localhost
+  connection: local
+  vars:
+    vm_name:        '{{ lookup("env", "USER") }}-oa'
+    vm_keyname:     '{{ lookup("env", "USER") }}'
+    vm_keypath:     '{{ lookup("env", "HOME") }}/.ssh/id_rsa.pub'
+    vm_image_name:  ubuntu-16.04-server-cloudimg
+    vm_image_user:  ubuntu
+    vm_flavor:      m1.large
+
+  vars_files:
+    - vars/shared.yml
+
+  tasks:
+    - name: Register an SSH keypair
+      os_keypair:
+        name:             '{{ vm_keyname }}'
+        public_key_file:  '{{ vm_keypath }}'
+        state:            present
+
+    - name: Boot VMs
+      os_server:
+        name:       '{{ vm_name }}-{{ item }}'
+        image:      '{{ vm_image_name }}'
+        flavor:     '{{ vm_flavor }}'
+        key_name:   '{{ vm_keyname }}'
+        auto_ip:    yes
+        timeout:    120
+        state:      present
+      register: vm_instances
+      with_sequence: start=1 end={{ nodes.values() | sum }}
+
+    - name: Wait VMs (booting)
+      wait_for:
+        host:     '{{ item.openstack.public_v4 }}'
+        port:     22
+        timeout:  360
+        state:    started
+      with_items: '{{ vm_instances.results }}'
+
+    - name: Add VMs to inventory
+      add_host:
+        name:             '{{ item.openstack.public_v4 }}'
+        groups:           target
+        ansible_ssh_user: '{{ vm_image_user }}'
+        index:            '{{ item.item | int - 1 }}'
+      with_flattened:
+        - '{{ vm_instances.results }}'
+
+    - name: Add VMs to known_hosts
+      known_hosts:
+        name: '{{ item.openstack.public_v4 }}'
+        key: '{{ lookup("pipe", "ssh-keyscan -t rsa " + item.openstack.public_v4) }}'
+      with_flattened:
+        - '{{ vm_instances.results }}'
+
+    - name: Choose first VM to be a deployment host
+      add_host:
+        name:             '{{ vm_instances.results.0.openstack.public_v4 }}'
+        groups:           deployment
+        ansible_ssh_user: '{{ vm_image_user }}'
+
+# Ubuntu 16.04 Xenial comes with no python2 by default which means we can't
+# use Ansible with those sort of hosts. So we need to install it before
+# proceeding any further and, fortunately, we can do it automatically by
+# using raw pre task without gathering any facts.
+- name: Ensure python2 is installed on VMs
+  hosts: target
+  pre_tasks:
+    - raw: sudo apt-get update && sudo apt-get install -y python
+  gather_facts: no
+
+
+- name: Configure the operating system
+  hosts: target
+  become: true
+
+  vars_files:
+    - vars/shared.yml
+
+  tasks:
+    - name: Upgrade the operating system
+      apt: upgrade=dist update_cache=yes
+
+    - name: Generate SSH key for root on deployment VM
+      user: name=root generate_ssh_key=yes
+      when: '"deployment" in group_names'
+
+    - name: Get deployment VM's public SSH key
+      shell: cat ~/.ssh/id_rsa.pub
+      register: pubkey
+      when: '"deployment" in group_names'
+
+    - name: Add deployment VM's public SSH key to authorized_keys
+      authorized_key:
+        user: root
+        key: '{{ hostvars[groups["deployment"][0]].pubkey.stdout }}'
+
+    - name: Install OpenStack Ansible requirements
+      apt: name={{ item }} state=present
+      with_items:
+        - bridge-utils
+        - debootstrap
+        - ifenslave
+        - ifenslave-2.6
+        - lsof
+        - lvm2
+        - ntp
+        - ntpdate
+        - tcpdump
+        - vlan
+
+    - name: Enable Linux kernel modules
+      modprobe: name={{ item }} state=present
+      with_items:
+        - bonding
+        - 8021q
+
+    - name: Disable persistent interface naming for bridges and vlans
+      template:
+        src: templates/systemd-network-namepolicy.j2
+        dest: /etc/systemd/network/10-{{ item.name }}.link
+      with_items:
+        - driver: "*802.1Q*"
+          policy: kernel
+          name: vlan
+        - driver: "*802.1Q* bridge"
+          policy: kernel
+          name: bridge
+
+    - name: Configure network interfaces
+      template:
+        src: templates/net-interfaces.cfg.j2
+        dest: /etc/network/interfaces.d/openstack-ansible.cfg
+
+    - name: Restart network in order to apply new configuration
+      service: name=networking state=restarted
+ 
+    - name: Wait for VM to come back after applying new network settings
+      become: false
+      local_action: wait_for host={{ ansible_ssh_host }} state=started
+
+
+- name: Install OpenStack Ansible
+  hosts: deployment
+  become: true
+  vars:
+    oa_repo: git://git.openstack.org/openstack/openstack-ansible
+    oa_branch: stable/newton
+    oa_src: /opt/openstack-ansible
+    oa_conf: /etc/openstack_deploy
+
+  vars_files:
+    - vars/shared.yml
+
+  tasks:
+    - name: Upgrade the operating system
+      apt: upgrade=dist update_cache=yes
+
+    - name: Install OpenStack Ansible requirements
+      apt: name={{ item }} state=present
+      with_items:
+        - build-essential
+        - git
+        - ntp
+        - ntpdate
+        - python-dev
+
+    - name: Fetch latest OpenStack Ansible
+      git: repo={{ oa_repo }} version={{ oa_branch }} dest={{ oa_src }}
+
+    - name: Bootstrap OpenStack Ansible
+      shell: scripts/bootstrap-ansible.sh chdir={{ oa_src }}
+
+    - name: Ensure deployment directories exist
+      file: path={{ item }} state=directory
+      with_items:
+        - '{{ oa_conf }}'
+
+    - name: Copying secrets skeleton from OpenStack Ansible sources
+      copy:
+        src: '{{ oa_src }}/etc/openstack_deploy/user_secrets.yml'
+        dest: '{{ oa_conf }}/user_secrets.yml'
+        remote_src: true
+
+    - name: Generate secrets for services
+      shell: python pw-token-gen.py --file {{ oa_conf }}/user_secrets.yml
+      args:
+        chdir: '{{ oa_src }}/scripts'
+
+    - name: Generate deployment configuration
+      template: src=templates/{{ item }}.j2 dest={{ oa_conf }}/{{ item }}
+      with_items:
+        - openstack_user_config.yml
+        - user_variables.yml
+
+    - name: Check OpenStack Ansible integrity
+      shell: openstack-ansible {{ item }} --syntax-check
+      args:
+        chdir: '{{ oa_src }}/playbooks'
+      with_items:
+        - setup-hosts.yml
+        - setup-infrastructure.yml
+        - setup-openstack.yml
+
+    - name: Deploy OpenStack
+      shell: openstack-ansible {{ item }}
+      args:
+        chdir: '{{ oa_src }}/playbooks'
+      with_items:
+        - setup-hosts.yml
+        - setup-infrastructure.yml
+        - setup-openstack.yml

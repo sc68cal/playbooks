@@ -1,0 +1,12 @@
+# Unfortunately, there's no way to define shared variables in the Ansible
+# playbook. Moreover, there's no way to do so using host_vars or group_vars
+# mechanism, since we need them to be defined for both localhost and dynamic
+# inventory, and localhost is not a part of any Ansible group.
+#
+# So the best we can do is to define them here, and include the file in
+# every play we need them.
+
+nodes:
+  controllers:  3
+  computes:     1
+  storages:     1
