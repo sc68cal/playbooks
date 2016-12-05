@@ -15,6 +15,18 @@ global_overrides:
   external_lb_vip_address: 172.29.236.3
   tunnel_bridge: br-vxlan
   management_bridge: br-mgmt
+  swift:
+    part_power: 8
+    repl_number: {{ nodes.storages }}
+    storage_network: br-storage
+    mount_point: /srv
+    drives:
+      - name: vdc
+    storage_policies:
+      - policy:
+          name: gold
+          index: 0
+          default: True
   provider_networks:
     - network:
         group_binds:
@@ -73,12 +85,13 @@ global_overrides:
     ip: {{ ipprefix }}{{ hostno + i }}
 {% if type == 'storage_hosts' %}
     container_vars:
-      lvm:
-        volume_backend_name: LVM_iSCSI
-        volume_driver: cinder.volume.drivers.lvm.LVMVolumeDriver
-        volume_group: cinder-volumes
-        iscsi_ip_address: {{ ipprefix}}{{ hostno + i }}
-      limit_container_types: cinder_volume
+      cinder_backends:
+        lvm:
+          volume_backend_name: LVM_iSCSI
+          volume_driver: cinder.volume.drivers.lvm.LVMVolumeDriver
+          volume_group: cinder-volumes
+          iscsi_ip_address: {{ ipprefix}}{{ hostno + i }}
+        limit_container_types: cinder_volume
 {% endif %}
 {% endfor %}
 {% endmacro %}
@@ -89,9 +102,11 @@ global_overrides:
 {{ definehosts('identity_hosts', 'infra', nodes.controllers, '172.29.236.', 10) }}
 {{ definehosts('network_hosts', 'infra', nodes.controllers, '172.29.236.', 10) }}
 {{ definehosts('storage-infra_hosts', 'infra', nodes.controllers, '172.29.236.', 10) }}
+{{ definehosts('swift-proxy_hosts', 'infra', nodes.controllers, '172.29.236.', 10) }}
 {{ definehosts('haproxy_hosts', 'infra', nodes.controllers, '172.29.236.', 10) }}
 {{ definehosts('log_hosts', 'infra', 1, '172.29.236.', 10) }}
 
 {{ definehosts('compute_hosts', 'compute', nodes.computes, '172.29.236.', 10 + nodes.controllers) }}
 
-{{ definehosts('storage_hosts', 'lvm-storage', nodes.storages, '172.29.236.', 10 + nodes.controllers + nodes.computes) }}
+{{ definehosts('storage_hosts', 'storage', nodes.storages, '172.29.236.', 10 + nodes.controllers + nodes.computes) }}
+{{ definehosts('swift_hosts', 'storage', nodes.storages, '172.29.236.', 10 + nodes.controllers + nodes.computes) }}
