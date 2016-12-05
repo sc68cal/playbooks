@@ -195,6 +195,9 @@
         - openstack_user_config.yml
         - user_variables.yml
 
+    - name: Ensure {{ oa_conf }}/env.d exist since it's essential for upgrades
+      file: path={{ oa_conf }}/env.d state=directory
+
     - name: Check OpenStack Ansible integrity
       shell: openstack-ansible {{ item }} --syntax-check
       args:
