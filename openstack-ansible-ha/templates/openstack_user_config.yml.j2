@@ -20,11 +20,11 @@ global_overrides:
         group_binds:
           - all_containers
           - hosts
-        type: "raw"
-        container_bridge: "br-mgmt"
-        container_interface: "eth1"
-        container_type: "veth"
-        ip_from_q: "container"
+        type: raw
+        container_bridge: br-mgmt
+        container_interface: eth1
+        container_type: veth
+        ip_from_q: container
         is_container_address: true
         is_ssh_address: true
 
@@ -34,46 +34,37 @@ global_overrides:
           - cinder_api
           - cinder_volume
           - nova_compute
-          # Uncomment the next line if using swift with a storage network.
-          # - swift_proxy
-        type: "raw"
-        container_bridge: "br-storage"
-        container_type: "veth"
-        container_interface: "eth2"
-        container_mtu: "9000"
-        ip_from_q: "storage"
+          - swift_proxy
+        type: raw
+        container_bridge: br-storage
+        container_type: veth
+        container_interface: eth2
+        container_mtu: 9000
+        ip_from_q: storage
 
     - network:
         group_binds:
           - neutron_linuxbridge_agent
-        container_bridge: "br-vxlan"
-        container_type: "veth"
-        container_interface: "eth10"
-        container_mtu: "9000"
-        ip_from_q: "tunnel"
-        type: "vxlan"
-        range: "1:1000"
-        net_name: "vxlan"
+        container_bridge: br-vxlan
+        container_type: veth
+        container_interface: eth10
+        container_mtu: 9000
+        ip_from_q: tunnel
+        type: vxlan
+        range: 1:1000
+        net_name: vxlan
 
+    # Unfortunately, having either "flat" or "vlan" network is mandatory
+    # for OpenStack Ansible. So we define this one and use a dump bridge
+    # that's not connected to any physical device.
     - network:
         group_binds:
           - neutron_linuxbridge_agent
-        container_bridge: "br-vlan"
-        container_type: "veth"
-        container_interface: "eth12"
-        host_bind_override: "eth12"
-        type: "flat"
-        net_name: "flat"
-
-#    - network:
-#        group_binds:
-#          - neutron_linuxbridge_agent
-#        container_bridge: "br-vlan"
-#        container_type: "veth"
-#        container_interface: "eth11"
-#        type: "vlan"
-#        range: "101:200,301:400"
-#        net_name: "vlan"
+        container_bridge: br-vlan
+        container_type: veth
+        container_interface: eth12
+        type: flat
+        net_name: flat
 
 {% macro definehosts(type, name, amount, ipprefix, hostno) %}
 {{ type }}:
