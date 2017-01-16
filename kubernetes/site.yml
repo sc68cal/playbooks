@@ -1,0 +1,166 @@
+- name: boot VMs in OpenStack cloud
+  hosts: localhost
+  connection: local
+  vars:
+    vm_name:        '{{ lookup("env", "USER") }}-k8s'
+    vm_keyname:     '{{ lookup("env", "USER") }}'
+    vm_keypath:     '{{ lookup("env", "HOME") }}/.ssh/id_rsa.pub'
+    vm_image_name:  ubuntu-16.04-server-cloudimg
+    vm_image_user:  ubuntu
+    vm_flavor:      m1.large
+    vm_count:
+      master:       1
+      node:         3
+
+  tasks:
+    - name: register an SSH keypair
+      os_keypair:
+        name:             '{{ vm_keyname }}'
+        public_key_file:  '{{ vm_keypath }}'
+        state:            present
+
+    - name: boot VMs
+      os_server:
+        name:       '{{ vm_name }}-{{ item }}'
+        image:      '{{ vm_image_name }}'
+        flavor:     '{{ vm_flavor }}'
+        key_name:   '{{ vm_keyname }}'
+        auto_ip:    yes
+        timeout:    120
+        state:      present
+      register: vm_instances
+      with_sequence: start=1 end={{ vm_count.values() | sum }}
+
+    - name: wait VMs (booting)
+      wait_for:
+        host:     '{{ item.openstack.public_v4 }}'
+        port:     22
+        timeout:  360
+        state:    started
+      with_items: '{{ vm_instances.results }}'
+
+    - name: add VMs to inventory
+      add_host:
+        name:             '{{ item.openstack.public_v4 }}'
+        groups:           target
+        ansible_ssh_user: '{{ vm_image_user }}'
+        index:            '{{ item.item | int }}'
+      with_flattened:
+        - '{{ vm_instances.results }}'
+
+    - name: choose VMs for Kubernetes master
+      add_host:
+        name:             '{{ item.openstack.public_v4 }}'
+        groups:           master
+        ansible_ssh_user: '{{ vm_image_user }}'
+      when: item.item | int <= vm_count.master
+      with_flattened:
+        - '{{ vm_instances.results }}'
+
+    - name: choose VMs for Kubernetes nodes
+      add_host:
+        name:             '{{ item.openstack.public_v4 }}'
+        groups:           node
+        ansible_ssh_user: '{{ vm_image_user }}'
+      when: item.item | int > vm_count.master and item.item | int <= vm_count.node + vm_count.master
+      with_flattened:
+        - '{{ vm_instances.results }}'
+
+    - name: add VMs to known_hosts
+      known_hosts:
+        name: '{{ item.openstack.public_v4 }}'
+        key: '{{ lookup("pipe", "ssh-keyscan -t rsa " + item.openstack.public_v4) }}'
+      with_flattened:
+        - '{{ vm_instances.results }}'
+
+# Ubuntu 16.04 Xenial comes with no python2 by default which means we can't
+# use Ansible with those sort of hosts. So we need to install it before
+# proceeding any further and, fortunately, we can do it automatically by
+# using raw pre task without gathering any facts.
+- name: ensure python2 is installed on VMs
+  hosts: target
+  pre_tasks:
+    - raw: sudo apt-get update && sudo apt-get install -y python
+  gather_facts: no
+
+- name: configure target hosts
+  hosts: target
+  become: true
+
+  tasks:
+    - name: upgrade the operating system
+      apt: upgrade=dist update_cache=yes
+
+    - name: install playbook requirements
+      apt: name={{ item }} state=present
+      with_items:
+        - python-apt
+
+    - name: add GPG key of Kubernetes APT repository
+      apt_key:
+        id: 3746C208A7317B0F
+        url: https://packages.cloud.google.com/apt/doc/apt-key.gpg
+        state: present
+
+    - name: add Kubernetes APT repository
+      apt_repository:
+        repo: deb http://apt.kubernetes.io/ kubernetes-xenial main
+        state: present
+
+    - name: install Kubernetes and its requirements
+      apt: name={{ item }} state=present
+      with_items:
+        - docker.io
+        - kubelet
+        - kubeadm
+        - kubectl
+        - kubernetes-cni
+
+    - name: do not require sudo for 'docker' command
+      user: name={{ ansible_user }} groups=docker append=yes
+
+- name: setup Kubernetes master
+  hosts: master
+  become: true
+  vars:
+    kubeadm_conf: /etc/kubeadm
+
+  tasks:
+    - name: generate Kubeadm token
+      shell: kubeadm token generate
+      register: kubeadm_token
+
+    - name: save Kubeadm token as 'kubeadm_token' fact
+      set_fact:
+        kubeadm_token: '{{ kubeadm_token.stdout }}'
+
+    - name: ensure {{ kubeadm_conf }} exists
+      file: path={{ kubeadm_conf }} state=directory
+
+    - name: render Kubeadm master configuration
+      template: src=templates/kubeadm-master.yml.j2 dest={{ kubeadm_conf }}/kubeadm.yml
+
+    - name: init Kubernetes master
+      shell: kubeadm init --config {{ kubeadm_conf }}/kubeadm.yml
+
+    - name: render Calico (hosted application) configuration
+      template: src=templates/calico.yml.j2 dest={{ kubeadm_conf }}/calico.yml
+
+    - name: deploy Calico for being used as network provider
+      shell: kubectl apply -f {{ kubeadm_conf }}/calico.yml
+
+- name: setup Kubernetes nodes
+  hosts: node
+  become: true
+  vars:
+    kubeadm_conf: /etc/kubeadm
+
+  tasks:
+    - name: ensure {{ kubeadm_conf }} exists
+      file: path={{ kubeadm_conf }} state=directory
+
+    - name: render Kubeadm node configuration
+      template: src=templates/kubeadm-node.yml.j2 dest={{ kubeadm_conf }}/kubeadm.yml
+
+    - name: join Kubernetes cluster
+      shell: kubeadm join --config {{ kubeadm_conf }}/kubeadm.yml
