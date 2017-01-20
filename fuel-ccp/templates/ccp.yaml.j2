@@ -1,0 +1,54 @@
+builder:
+  push: True
+registry:
+  address: registry.mcp.fuel-infra.org
+repositories:
+  skip_empty: True
+images:
+  namespace: mcp
+  tag: newton
+nodes:
+{% for hostname in groups['node'][:1] %}
+  {{ hostvars[hostname]['ansible_hostname'] }}:
+    roles:
+      - controller
+      - openvswitch
+{% endfor %}
+{% for hostname in groups['node'][1:] %}
+  {{ hostvars[hostname]['ansible_hostname'] }}:
+    roles:
+      - compute
+      - openvswitch
+{% endfor %}
+roles:
+  controller:
+    - etcd
+    - glance-api
+    - glance-registry
+    - heat-api-cfn
+    - heat-api
+    - heat-engine
+    - horizon
+    - keystone
+    - mariadb
+    - memcached
+    - neutron-dhcp-agent
+    - neutron-l3-agent
+    - neutron-metadata-agent
+    - neutron-server
+    - nova-api
+    - nova-conductor
+    - nova-consoleauth
+    - nova-novncproxy
+    - nova-scheduler
+    - rabbitmq
+  compute:
+    - nova-compute
+    - nova-libvirt
+  openvswitch:
+    - neutron-openvswitch-agent
+    - openvswitch-db
+    - openvswitch-vswitchd
+configs:
+    private_interface: ens3
+    public_interface: ens3

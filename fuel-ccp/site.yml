@@ -1,0 +1,85 @@
+# Fuel CCP requires Kubernetes master, so let's reuse already written
+# playbook in the name of sanity and DRY principle. :)
+- include: ../kubernetes/site.yml
+
+# Some of Fuel CCP containers use host networking and hence doesn't use
+# kube-dns to resolve endpoints. That leads to failure of such containers
+# as they can't resolve etcd endpoint. In order to workaround this, we
+# need to setup kube-dns as primary DNS server on all kubernetes nodes.
+- name: configure target hosts
+  hosts: target
+  become: true
+  tasks:
+    - name: get 'kube-dns' IP address
+      shell: kubectl get service kube-dns -o=jsonpath={.spec.clusterIP} --namespace=kube-system
+      register: _kubedns
+      when: inventory_hostname in groups['master']
+
+    - name: save 'kude-dns' IP address as 'kubedns_ip' fact
+      set_fact:
+        kubedns_ip: '{{ _kubedns.stdout }}'
+      when: inventory_hostname in groups['master']
+
+    - name: ensure 'kube-dns' is used as primary DNS server
+      lineinfile:
+        dest: /etc/resolvconf/resolv.conf.d/head
+        regexp: ^nameserver {{ hostvars[groups['master'][0]]['kubedns_ip'] }}
+        insertafter: EOF
+        line: nameserver {{ hostvars[groups['master'][0]]['kubedns_ip'] }}
+
+    - name: Update the list of nameservers
+      shell: resolvconf -u
+
+- name: deploy Fuel CCP
+  hosts: master
+  vars:
+    fuelccp_repo: https://git.openstack.org/openstack/fuel-ccp
+    fuelccp_dest: '{{ ansible_env.HOME }}/fuel-ccp'
+
+  tasks:
+    - name: install requirements
+      apt: name={{ item }} state=present
+      with_items:
+        - python-pip
+        - python-dev
+        - python3-dev
+        - python-netaddr
+        - software-properties-common
+        - python-setuptools
+        - gcc
+        - git
+      become: true
+
+    - name: fetch latest Fuel CCP
+      git: repo={{ fuelccp_repo }} dest={{ fuelccp_dest }}
+
+    - name: install latest Fuel CCP
+      pip: name=. chdir={{ fuelccp_dest }}
+      become: true
+
+    - debug: var=hostvars[inventory_hostname]
+
+    - name: render ~/.ccp.yaml
+      template: src=templates/ccp.yaml.j2 dest={{ ansible_env.HOME }}/.ccp.yaml
+
+    - name: run Docker registry
+      shell: kubectl apply --namespace=kube-system -f {{ item }}
+      with_items:
+        - '{{ fuelccp_dest }}/tools/registry/registry-pod.yaml'
+        - '{{ fuelccp_dest }}/tools/registry/registry-service.yaml'
+
+    - name: allow Docker registry to run on Kubernetes master
+      shell: '{{ item }}'
+      with_items:
+        - kubectl annotate pod registry scheduler.alpha.kubernetes.io/tolerations='[{"key":"dedicated","value":"master"}]' --namespace=kube-system
+        - kubectl label nodes {{ ansible_hostname }} app=ccp-registry
+
+    - name: wait for Docker registry become ready
+      shell: kubectl get pod registry -o=jsonpath={.status.containerStatuses[*].ready} --namespace=kube-system
+      register: _ready
+      until: _ready.stdout == 'true'
+      retries: 6
+      delay: 10
+
+    - name: deploy Fuel CCP
+      shell: ccp deploy
